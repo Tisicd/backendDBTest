@@ -18,10 +18,10 @@ jobs:
     
     steps:
     - name: Checkout código
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Configurar Node.js
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
         node-version: ${{ env.NODE_VERSION }}
         cache: 'npm'
@@ -45,7 +45,7 @@ jobs:
         tar -czf dist/docker-compose.tar.gz docker-compose.yml
 
     - name: Subir artefactos
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: deployment-package
         path: dist/*.tar.gz
@@ -64,7 +64,7 @@ jobs:
 
     steps:
     - name: Descargar artefactos
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: deployment-package
 
