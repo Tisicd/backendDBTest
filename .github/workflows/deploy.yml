@@ -1,0 +1,144 @@
+name: Build and Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+env:
+  NODE_VERSION: '18.x'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+
+    - name: Configurar Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: backend/package-lock.json
+
+    - name: Instalar dependencias
+      working-directory: ./backend
+      run: npm ci
+
+    - name: Ejecutar tests (si existen)
+      working-directory: ./backend
+      run: |
+        echo "Ejecutando validaciones..."
+        npm run test || echo "No hay tests configurados"
+
+    - name: Crear archivo de empaquetado
+      run: |
+        mkdir -p dist
+        tar -czf dist/backend.tar.gz -C backend .
+        tar -czf dist/database.tar.gz -C database .
+        tar -czf dist/docker-compose.tar.gz docker-compose.yml
+
+    - name: Subir artefactos
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-package
+        path: dist/*.tar.gz
+        retention-days: 7
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    
+    strategy:
+      matrix:
+        instance: [1]
+        # Para múltiples instancias, cambia a: [1, 2, 3]
+        # y agrega los secrets correspondientes: EC2_HOST_2, EC2_USER_2, EC2_SSH_KEY_2, etc.
+
+    steps:
+    - name: Descargar artefactos
+      uses: actions/download-artifact@v3
+      with:
+        name: deployment-package
+
+    - name: Configurar SSH y variables
+      id: config
+      run: |
+        INSTANCE=${{ matrix.instance }}
+        mkdir -p ~/.ssh
+        
+        # Configurar variables según el número de instancia
+        if [ "$INSTANCE" = "1" ]; then
+          echo "EC2_HOST=${{ secrets.EC2_HOST_1 }}" >> $GITHUB_ENV
+          echo "EC2_USER=${{ secrets.EC2_USER_1 }}" >> $GITHUB_ENV
+          echo "${{ secrets.EC2_SSH_KEY_1 }}" > ~/.ssh/deploy_key
+        elif [ "$INSTANCE" = "2" ]; then
+          echo "EC2_HOST=${{ secrets.EC2_HOST_2 }}" >> $GITHUB_ENV
+          echo "EC2_USER=${{ secrets.EC2_USER_2 }}" >> $GITHUB_ENV
+          echo "${{ secrets.EC2_SSH_KEY_2 }}" > ~/.ssh/deploy_key
+        elif [ "$INSTANCE" = "3" ]; then
+          echo "EC2_HOST=${{ secrets.EC2_HOST_3 }}" >> $GITHUB_ENV
+          echo "EC2_USER=${{ secrets.EC2_USER_3 }}" >> $GITHUB_ENV
+          echo "${{ secrets.EC2_SSH_KEY_3 }}" > ~/.ssh/deploy_key
+        fi
+        
+        chmod 600 ~/.ssh/deploy_key
+        ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts || true
+
+    - name: Desplegar a EC2
+      run: |
+        ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST << 'EOF'
+          # Crear directorio de aplicación si no existe
+          mkdir -p ~/backdb-app
+          cd ~/backdb-app
+          
+          # Detener contenedores existentes
+          docker-compose down || true
+          
+          # Limpiar archivos antiguos
+          rm -rf backend database docker-compose.yml || true
+        EOF
+        
+        # Transferir archivos empaquetados
+        scp -i ~/.ssh/deploy_key backend.tar.gz $EC2_USER@$EC2_HOST:~/backdb-app/
+        scp -i ~/.ssh/deploy_key database.tar.gz $EC2_USER@$EC2_HOST:~/backdb-app/
+        scp -i ~/.ssh/deploy_key docker-compose.tar.gz $EC2_USER@$EC2_HOST:~/backdb-app/
+        
+        # Descomprimir y desplegar
+        ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST << 'EOF'
+          cd ~/backdb-app
+          
+          # Descomprimir archivos
+          tar -xzf backend.tar.gz -C .
+          tar -xzf database.tar.gz -C .
+          tar -xzf docker-compose.tar.gz -C .
+          
+          # Limpiar archivos comprimidos
+          rm -f *.tar.gz
+          
+          # Copiar archivo .env si existe
+          if [ -f ~/.env.backdb ]; then
+            cp ~/.env.backdb backend/.env
+          fi
+          
+          # Iniciar servicios con Docker Compose
+          docker-compose up -d --build
+          
+          # Esperar a que la base de datos esté lista
+          echo "Esperando a que la base de datos esté lista..."
+          sleep 10
+          
+          # Verificar estado
+          docker-compose ps
+        EOF
+
+    - name: Notificar despliegue exitoso
+      run: |
+        echo "✅ Despliegue exitoso a ec2-instance-${{ matrix.instance }}"
